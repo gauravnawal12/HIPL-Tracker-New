@@ -1475,20 +1475,31 @@ async function pushDispatch(who, headers, rows, veh) {
     await pushOne("Dispatch - " + who, headers, rows);
 
     /* 3. Combined sheet: filter rows by the Combined rules */
+    /* COMBINED SHEET RULES — who goes in:
+       - Guard : NEVER — Guard tab is for verification only
+       - Mukesh: only when vehicle is NOT one of his own (MUKESH_VEHICLES)
+       - Subhash, Anandaram: always included */
     var combinedRows = rows.filter(function(row) {
-      var rowVeh = row[5]; /* column 6 = Vehicle No. */
+      if (who === "Guard") return false;          /* Guard never goes to Combined */
+      var rowVeh = row[5];                        /* column index 5 = Vehicle No. */
       if (who === "Mukesh") {
         return MUKESH_VEHICLES.indexOf(rowVeh) === -1;
       }
       return true; /* Subhash & Anandaram: always included */
     });
 
+    /* 3. Push to Combined (filtered — Guard and Mukesh's own vehicles excluded) */
     if (combinedRows.length > 0) {
       await pushOneSorted("Combined", headers, combinedRows);
+    }
 
-      /* 4. Daily Summary: tell Apps Script to rebuild the summary sheet
-            by reading ALL rows in Combined and re-aggregating.
-            We send the summary headers but no rows — Apps Script does the work. */
+    /* 4. Daily Summary — rebuild after EVERY non-Guard dispatch save.
+          Guard entries never touch Combined so their saves skip this too.
+          For all others (Subhash, Anandaram, and Mukesh) we always rebuild
+          so the summary stays accurate even when Mukesh uses his own vehicles
+          (those entries go to Outward + his personal sheet only, not Combined,
+          but we still want the summary to reflect the latest Combined state). */
+    if (who !== "Guard") {
       var SH = ["Date","Machine","Product","Thickness","Color","Total Dispatched"];
       await pushSummary(SH);
     }
@@ -2093,12 +2104,13 @@ function exportExcel() {
        - All Anandaram entries
        - Mukesh entries only where vehicle is NOT in MUKESH_VEHICLES
      Sorted by date (oldest first — same as the Sheets Combined tab). */
+  /* Combined sheet filter — matches Google Sheets Combined tab rules:
+     Guard: never included. Mukesh: only non-own-vehicles. Others: always. */
   var combinedRecs = outR.filter(function(r) {
+    if (r.enteredBy === "Guard") return false;
     if (r.enteredBy === "Mukesh") {
-      /* Include Mukesh only if vehicle is NOT one of his own */
       return MUKESH_VEHICLES.indexOf(r.vehicleNo) === -1;
     }
-    /* Subhash and Anandaram: always include */
     return true;
   });
   /* Sort by date — parse Indian date format DD/MM/YYYY for correct comparison */
