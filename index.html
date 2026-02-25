@@ -960,6 +960,7 @@ tr:hover td { background: rgba(247,184,16,.04); }
       <li>Set <b>Execute as: Me</b> &amp; <b>Who has access: Anyone</b> → click <b>Deploy</b></li>
       <li>Copy the <b>Web App URL</b>, paste it in the box below, click <b>Save URL</b></li>
     </ol>
+    <div id="diag-out" style="display:none;margin-top:10px;background:#f0f4f8;border:1.5px solid #dde1e7;border-radius:8px;padding:12px;font-family:Courier New,monospace;font-size:11px;color:#2c3b48;white-space:pre-wrap;max-height:300px;overflow-y:auto;line-height:1.6"></div>
     <p style="font-size:12px;color:#78350f;margin:6px 0 10px;line-height:1.6;background:#fef9e7;padding:8px 12px;border-radius:6px;border-left:3px solid #d97706">
       <b>ℹ️ About the Test button:</b> It only works when the app is <b>hosted</b> (GitHub Pages / Netlify).
       If you opened this as a local HTML file, the test will fail — but your URL is saved and
@@ -980,6 +981,7 @@ tr:hover td { background: rgba(247,184,16,.04); }
       <input id="urlin" placeholder="Paste Apps Script Web App URL here…" type="url"/>
       <button onclick="saveUrl()"  style="background:var(--gold);color:#1a1a1a;font-weight:700">Save URL</button>
       <button onclick="testUrl()"  style="background:var(--green)">Test</button>
+      <button onclick="diagnose()" style="background:#7c3aed;color:#fff;font-weight:700;padding:10px 16px;border:none;border-radius:var(--radius-md);font-family:var(--font-display);font-size:13px;min-height:44px">🔍 Diagnose</button>
     </div>
   </div>
 
@@ -1449,7 +1451,8 @@ async function pushInward(rows) {
     syncSt("ok");
   } catch(e) {
     syncSt("err");
-    showMsg("Saved locally — Sheets sync failed","wrn");
+    /* Show the actual error message so we can diagnose */
+    showMsg("Sync error: " + (e.message || e), "err");
   }
 }
 
@@ -1493,16 +1496,10 @@ async function pushDispatch(who, headers, rows, veh) {
       await pushOneSorted("Combined", headers, combinedRows);
     }
 
-    /* 4. Daily Summary — rebuild after EVERY non-Guard dispatch save.
-          Guard entries never touch Combined so their saves skip this too.
-          For all others (Subhash, Anandaram, and Mukesh) we always rebuild
-          so the summary stays accurate even when Mukesh uses his own vehicles
-          (those entries go to Outward + his personal sheet only, not Combined,
-          but we still want the summary to reflect the latest Combined state). */
-    if (who !== "Guard") {
-      var SH = ["Date","Machine","Product","Thickness","Color","Total Dispatched"];
-      await pushSummary(SH);
-    }
+    /* 4. Daily Summary is rebuilt inside pushOneSorted (rebuildSummaryAfter:true)
+          so it happens atomically on the server after Combined is updated.
+          No separate call needed — the combined write and summary rebuild
+          happen in the same Apps Script execution. */
 
     syncSt("ok");
   } catch(e) {
@@ -1523,12 +1520,22 @@ async function pushSummary(summaryHeaders) {
     body: JSON.stringify({
       sheet: "Daily Summary",
       headers: summaryHeaders,
-      rows: [],          /* empty — server reads from Combined */
-      rebuildSummary: true /* triggers special aggregation logic in Apps Script */
+      rows: [],
+      rebuildSummary: true
     })
   });
-  var j = await r.json();
-  if (j.status !== "ok") throw new Error("Daily Summary rebuild failed");
+  /* Parse response — show exactly what Apps Script returned for debugging */
+  var txt = await r.text();
+  var j;
+  try { j = JSON.parse(txt); } catch(ex) { j = {}; }
+  if (j.status === "ok") {
+    if (j.summaryRows > 0) {
+      showMsg("✓ Synced — Daily Summary: " + j.summaryRows + " rows updated", "inf");
+    }
+  } else {
+    showMsg("Sync error: " + txt.slice(0, 120), "err");
+    throw new Error("Sheets error: " + txt.slice(0, 120));
+  }
 }
 
 /* Like pushOne but tells Apps Script to sort by date column after appending.
@@ -1538,11 +1545,26 @@ async function pushOneSorted(sheet, headers, rows) {
   var r = await fetch(scUrl, {
     method: "POST",
     headers: { "Content-Type": "text/plain" },
-    /* sortByDate:true tells the Apps Script to re-sort the sheet after appending */
-    body: JSON.stringify({ sheet: sheet, headers: headers, rows: rows, sortByDate: true })
+    /* sortByDate:true + rebuildSummaryAfter:true — Apps Script will:
+       1. Append the rows to Combined
+       2. Sort Combined by date
+       3. Immediately rebuild Daily Summary from the now-updated Combined
+       All in one server-side transaction — no race condition. */
+    body: JSON.stringify({
+      sheet: sheet,
+      headers: headers,
+      rows: rows,
+      sortByDate: true,
+      rebuildSummaryAfter: true
+    })
   });
-  var j = await r.json();
-  if (j.status !== "ok") throw new Error("Sheets rejected: " + sheet);
+  var txt = await r.text();
+  var j;
+  try { j = JSON.parse(txt); } catch(ex) { j = {}; }
+  if (j.status !== "ok") throw new Error("Sheets rejected: " + sheet + " — " + txt.slice(0,100));
+  if (j.summaryRows !== undefined) {
+    showMsg("✓ Saved — Daily Summary: " + j.summaryRows + " rows", "inf");
+  }
 }
 
 
@@ -1566,6 +1588,58 @@ function saveUrl() {
 }
 
 /* Send a test GET request to verify the URL is correct and working */
+/* Diagnose: sends the exact same payload as a real Combined write,
+   then shows the raw response from Apps Script in full detail.
+   This tells us exactly what Apps Script is receiving and returning. */
+async function diagnose() {
+  var out = g("diag-out");
+  out.style.display = "block";
+  out.textContent = "Running diagnosis...\n\n";
+
+  if (!scUrl) { out.textContent += "ERROR: No URL saved. Paste URL and click Save URL first."; return; }
+
+  var log = function(msg) { out.textContent += msg + "\n"; };
+
+  // Step 1: GET request - basic connectivity
+  log("STEP 1: Testing basic connectivity (GET)...");
+  try {
+    var r1 = await fetch(scUrl);
+    var t1 = await r1.text();
+    log("  Status: " + r1.status);
+    log("  Response: " + t1.slice(0,200));
+  } catch(e) { log("  ERROR: " + e.message); }
+
+  // Step 2: Send a test POST with rebuildSummaryAfter:true and dummy row
+  log("\nSTEP 2: Sending test POST with rebuildSummaryAfter:true...");
+  var testPayload = {
+    sheet: "Combined",
+    headers: ["Date","Time","Entered By","Party Name","Bill/Challan Number","Vehicle No.","Machine","Product","Thickness","Color","Material Quantity"],
+    rows: [["TEST-"+new Date().toLocaleDateString("en-GB"),"00:00","Subhash","TEST PARTY","TEST-BILL","TEST-VEH","Apollo","Hexagon","60 MM","Grey",1]],
+    sortByDate: true,
+    rebuildSummaryAfter: true
+  };
+  log("  Payload: " + JSON.stringify(testPayload).slice(0,300));
+  try {
+    var r2 = await fetch(scUrl, {
+      method: "POST",
+      headers: {"Content-Type": "text/plain"},
+      body: JSON.stringify(testPayload)
+    });
+    var t2 = await r2.text();
+    log("  HTTP Status: " + r2.status);
+    log("  Raw response: " + t2.slice(0,500));
+    try {
+      var j2 = JSON.parse(t2);
+      log("  Parsed JSON: " + JSON.stringify(j2));
+      log("  status = " + j2.status);
+      log("  added = " + j2.added);
+      log("  summaryRows = " + j2.summaryRows);
+    } catch(ex) { log("  Could not parse as JSON: " + ex.message); }
+  } catch(e) { log("  FETCH ERROR: " + e.message); }
+
+  log("\nDiagnosis complete. Share this output to debug the issue.");
+}
+
 function testUrl() {
   if (!scUrl) { showMsg("Paste the URL first", "err"); return; }
   syncSt("ing");
@@ -2186,92 +2260,102 @@ window.onload = function() {
      It creates/appends to sheet tabs by name on every POST call. */
   g("codebox").textContent =
     'function doPost(e) {\n' +
-    '  var ss = SpreadsheetApp.openById("1C4heyLELF7CJsFqC-c53SJwcpIxQPBZm6EYdjBl-cdg");\n' +
+    '  var ss   = SpreadsheetApp.openById(\"1C4heyLELF7CJsFqC-c53SJwcpIxQPBZm6EYdjBl-cdg\");\n' +
     '  var data = JSON.parse(e.postData.contents);\n' +
     '\n' +
-    '  // Test ping from the app Test button — return ok without writing\n' +
+    '  // ── Test ping ──\n' +
     '  if (data.testOnly) {\n' +
     '    return ContentService\n' +
-    '      .createTextOutput(JSON.stringify({ status: "ok", test: true }))\n' +
+    '      .createTextOutput(JSON.stringify({status:\"ok\",test:true}))\n' +
     '      .setMimeType(ContentService.MimeType.JSON);\n' +
     '  }\n' +
     '\n' +
-    '  // Rebuild Daily Summary from Combined sheet (called after every Combined update)\n' +
-    '  if (data.rebuildSummary) {\n' +
-    '    var combined = ss.getSheetByName("Combined");\n' +
-    '    var summary  = ss.getSheetByName("Daily Summary");\n' +
-    '    if (!summary) summary = ss.insertSheet("Daily Summary");\n' +
-    '\n' +
-    '    var totals = {};\n' +
-    '    if (combined && combined.getLastRow() > 1) {\n' +
-    '      var allRows = combined.getRange(2, 1, combined.getLastRow() - 1, combined.getLastColumn()).getValues();\n' +
-    '      allRows.forEach(function(row) {\n' +
-    '        // Combined columns: Date(0) Time(1) EnteredBy(2) Party(3) Bill(4)\n' +
-    '        //   Vehicle(5) Machine(6) Product(7) Thickness(8) Color(9) Qty(10)\n' +
-    '        var key = [row[0], row[6], row[7], row[8], row[9]].join("|");\n' +
-    '        totals[key] = (totals[key] || 0) + (Number(row[10]) || 0);\n' +
-    '      });\n' +
-    '    }\n' +
-    '\n' +
-    '    var summaryRows = Object.keys(totals).map(function(k) {\n' +
-    '      var p = k.split("|");\n' +
-    '      return [p[0], p[1], p[2], p[3], p[4], totals[k]];\n' +
-    '    }).sort(function(a, b) {\n' +
-    '      function pd(s) {\n' +
-    '        var pts = String(s).split("/");\n' +
-    '        return pts.length === 3 ? new Date(pts[2], pts[1]-1, pts[0]) : new Date(0);\n' +
-    '      }\n' +
-    '      var d = pd(a[0]) - pd(b[0]);\n' +
-    '      return d !== 0 ? d : String(a[1]).localeCompare(String(b[1]));\n' +
-    '    });\n' +
-    '\n' +
-    '    var SH = ["Date","Machine","Product","Thickness","Color","Total Dispatched"];\n' +
-    '    summary.clearContents();\n' +
-    '    summary.appendRow(SH);\n' +
-    '    var sumHdr = summary.getRange(1, 1, 1, SH.length);\n' +
-    '    sumHdr.setFontWeight("bold").setBackground("#2c3b48").setFontColor("#f7b810");\n' +
-    '    summary.setFrozenRows(1);\n' +
-    '    summary.setColumnWidths(1, SH.length, 140);\n' +
-    '    summaryRows.forEach(function(r) { summary.appendRow(r); });\n' +
-    '\n' +
-    '    return ContentService\n' +
-    '      .createTextOutput(JSON.stringify({ status: "ok", added: summaryRows.length }))\n' +
-    '      .setMimeType(ContentService.MimeType.JSON);\n' +
-    '  }\n' +
-    '\n' +
-    '  // Normal case: find or create the target sheet tab, then append rows\n' +
+    '  // ── Write rows to the named sheet ──\n' +
     '  var sheet = ss.getSheetByName(data.sheet);\n' +
     '  if (!sheet) sheet = ss.insertSheet(data.sheet);\n' +
     '\n' +
-    '  // If the sheet is brand new, write a styled header row first\n' +
     '  if (sheet.getLastRow() === 0) {\n' +
     '    sheet.appendRow(data.headers);\n' +
-    '    var sheetHdr = sheet.getRange(1, 1, 1, data.headers.length);\n' +
-    '    sheetHdr.setFontWeight("bold").setBackground("#2c3b48").setFontColor("#f7b810");\n' +
+    '    var h0 = sheet.getRange(1, 1, 1, data.headers.length);\n' +
+    '    h0.setFontWeight(\"bold\").setBackground(\"#2c3b48\").setFontColor(\"#f7b810\");\n' +
     '    sheet.setFrozenRows(1);\n' +
     '    sheet.setColumnWidths(1, data.headers.length, 140);\n' +
     '  }\n' +
     '\n' +
-    '  // Append each data row\n' +
     '  data.rows.forEach(function(r) { sheet.appendRow(r); });\n' +
     '\n' +
-    '  // Sort by date column after appending (used for Combined sheet)\n' +
-    '  if (data.sortByDate) {\n' +
-    '    var lastRow = sheet.getLastRow();\n' +
-    '    if (lastRow > 2) {\n' +
-    '      var range = sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn());\n' +
-    '      range.sort({ column: 1, ascending: true });\n' +
+    '  // ── Sort by date after appending (Combined sheet) ──\n' +
+    '  if (data.sortByDate && sheet.getLastRow() > 2) {\n' +
+    '    sheet.getRange(2, 1, sheet.getLastRow()-1, sheet.getLastColumn())\n' +
+    '         .sort({column:1, ascending:true});\n' +
+    '  }\n' +
+    '\n' +
+    '  // ── Rebuild Daily Summary in the SAME call ──\n' +
+    '  var summaryRowCount = 0;\n' +
+    '  if (data.rebuildSummaryAfter) {\n' +
+    '    var src = ss.getSheetByName(\"Combined\");\n' +
+    '    var dst = ss.getSheetByName(\"Daily Summary\");\n' +
+    '    if (!dst) dst = ss.insertSheet(\"Daily Summary\");\n' +
+    '\n' +
+    '    var SH = [\"Date\",\"Machine\",\"Product\",\"Thickness\",\"Color\",\"Total Dispatched\"];\n' +
+    '    dst.clearContents();\n' +
+    '\n' +
+    '    if (src && src.getLastRow() > 1) {\n' +
+    '      var nRows = src.getLastRow() - 1;\n' +
+    '      var nCols = src.getLastColumn();\n' +
+    '      var vals  = src.getRange(2, 1, nRows, nCols).getValues();\n' +
+    '      var tz    = Session.getScriptTimeZone();\n' +
+    '      var tot   = {};\n' +
+    '\n' +
+    '      vals.forEach(function(row) {\n' +
+    '        var d = row[0];\n' +
+    '        var ds = (d instanceof Date && !isNaN(d))\n' +
+    '                 ? Utilities.formatDate(d, tz, \"dd/MM/yyyy\")\n' +
+    '                 : String(d).trim();\n' +
+    '        var mac = String(row[6]||\"\").trim();\n' +
+    '        var pro = String(row[7]||\"\").trim();\n' +
+    '        var thk = String(row[8]||\"\").trim();\n' +
+    '        var col = String(row[9]||\"\").trim();\n' +
+    '        var qty = Number(row[10])||0;\n' +
+    '        if (!mac || !ds) return;\n' +
+    '        var k = ds+\"|\"+mac+\"|\"+pro+\"|\"+thk+\"|\"+col;\n' +
+    '        tot[k] = (tot[k]||0) + qty;\n' +
+    '      });\n' +
+    '\n' +
+    '      var sRows = Object.keys(tot).map(function(k){\n' +
+    '        var p=k.split(\"|\");\n' +
+    '        return [p[0],p[1],p[2],p[3],p[4],tot[k]];\n' +
+    '      }).sort(function(a,b){\n' +
+    '        function pd(s){var p=String(s).split(\"/\");return p.length===3?new Date(p[2],p[1]-1,p[0]):new Date(0);}\n' +
+    '        var d=pd(a[0])-pd(b[0]);\n' +
+    '        return d!==0?d:String(a[1]).localeCompare(String(b[1]));\n' +
+    '      });\n' +
+    '\n' +
+    '      var out = [SH].concat(sRows);\n' +
+    '      dst.getRange(1, 1, out.length, SH.length).setValues(out);\n' +
+    '      summaryRowCount = sRows.length;\n' +
+    '    } else {\n' +
+    '      dst.appendRow(SH);\n' +
     '    }\n' +
+    '\n' +
+    '    var h1 = dst.getRange(1, 1, 1, SH.length);\n' +
+    '    h1.setFontWeight(\"bold\").setBackground(\"#2c3b48\").setFontColor(\"#f7b810\");\n' +
+    '    dst.setFrozenRows(1);\n' +
+    '    dst.setColumnWidths(1, SH.length, 140);\n' +
     '  }\n' +
     '\n' +
     '  return ContentService\n' +
-    '    .createTextOutput(JSON.stringify({ status: "ok", added: data.rows.length }))\n' +
+    '    .createTextOutput(JSON.stringify({\n' +
+    '      status: \"ok\",\n' +
+    '      added: data.rows.length,\n' +
+    '      summaryRows: summaryRowCount\n' +
+    '    }))\n' +
     '    .setMimeType(ContentService.MimeType.JSON);\n' +
     '}\n' +
     '\n' +
     'function doGet(e) {\n' +
     '  return ContentService\n' +
-    '    .createTextOutput(JSON.stringify({ status: "ready" }))\n' +
+    '    .createTextOutput(JSON.stringify({status:\"ready\"}))\n' +
     '    .setMimeType(ContentService.MimeType.JSON);\n' +
     '}';
 
