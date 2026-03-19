@@ -154,7 +154,15 @@
     /* LOG */
     .log-section{margin-top:8px}
     .log-title{font-size:12px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-dim);margin-bottom:12px}
-    .log-empty{text-align:center;padding:32px;font-size:14px;color:var(--ink-faint);background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r)}
+    .log-empty{text-align:center;padding:32px 20px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r)}
+    .log-empty-icon{font-size:32px;margin-bottom:10px}
+    .log-empty-title{font-size:15px;font-weight:600;color:var(--ink);margin-bottom:6px}
+    .log-empty-sub{font-size:13px;color:var(--ink-faint);line-height:1.5}
+    .log-missing-banner{display:flex;align-items:flex-start;gap:12px;padding:14px 16px;margin-bottom:12px;background:#FFF8E1;border:1px solid #FFD54F;border-radius:var(--r)}
+    .log-missing-icon{font-size:20px;flex-shrink:0;margin-top:1px}
+    .log-missing-body{flex:1}
+    .log-missing-title{font-size:14px;font-weight:600;color:#7B5800;margin-bottom:3px}
+    .log-missing-sub{font-size:12px;color:#9B6F00;line-height:1.5}
     .log-batch{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r);margin-bottom:10px;overflow:hidden;box-shadow:var(--shadow-sm)}
     .log-batch-hdr{display:flex;align-items:center;gap:10px;padding:11px 16px;cursor:pointer;font-size:13px;background:var(--bg-warm);border-bottom:1px solid var(--border);transition:background 0.15s}
     .log-batch-hdr:hover{background:#F0EFE9}
@@ -858,31 +866,94 @@ async function syncQueue() {
 function renderLog() {
   var list    = $('logList');
   var batches = JSON.parse(localStorage.getItem('hipl_batches') || '[]');
+
+  // ── Determine yesterday's date string (YYYY-MM-DD) ──────────────────
+  var now       = new Date();
+  var yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+  var yyyymmdd  = function(d) {
+    return d.getFullYear() + '-' +
+           String(d.getMonth() + 1).padStart(2, '0') + '-' +
+           String(d.getDate()).padStart(2, '0');
+  };
+  var yesterdayStr = yyyymmdd(yesterday);
+  var yesterdayLabel = yesterday.toLocaleDateString('en-IN', { weekday:'short', day:'numeric', month:'short' });
+
+  // ── Check if any batch covers yesterday ─────────────────────────────
+  var hasYesterdayData = batches.some(function(b) {
+    return (b.batch || []).some(function(e) { return e.date === yesterdayStr; });
+  });
+
+  // ── Build the missing-data warning banner (shown above log) ─────────
+  // Only show if: past 6 AM (reasonable time to have uploaded), and no yesterday submission
+  var warningHtml = '';
+  if (now.getHours() >= 6 && !hasYesterdayData) {
+    warningHtml =
+      '<div class="log-missing-banner">' +
+        '<div class="log-missing-icon">\u26a0\ufe0f</div>' +
+        '<div class="log-missing-body">' +
+          '<div class="log-missing-title">Production &amp; Dispatch data not uploaded</div>' +
+          '<div class="log-missing-sub">No entries found for <strong>' + yesterdayLabel + '</strong>. ' +
+            'If it was a holiday or off day, you can ignore this.</div>' +
+        '</div>' +
+      '</div>';
+  }
+
+  // ── Empty state ──────────────────────────────────────────────────────
   if (!batches.length) {
-    list.innerHTML = '<div class="log-empty">No submissions yet \u2014 entries will appear here after submitting.</div>';
+    list.innerHTML =
+      warningHtml +
+      '<div class="log-empty">' +
+        '<div class="log-empty-icon">\ud83d\udccb</div>' +
+        '<div class="log-empty-title">No submissions yet</div>' +
+        '<div class="log-empty-sub">Fill in the entry form above and tap <strong>Submit All</strong>. ' +
+          'Your submissions will appear here.</div>' +
+      '</div>';
     return;
   }
-  list.innerHTML = batches.slice(0, 8).map(function(b, i) {
+
+  // ── Filter out batches with no meaningful data (all-zero prod+disp) ──
+  var meaningfulBatches = batches.filter(function(b) {
+    return (b.batch || []).some(function(e) {
+      return Number(e.production) > 0 || Number(e.dispatch) > 0;
+    });
+  });
+
+  if (!meaningfulBatches.length) {
+    list.innerHTML =
+      warningHtml +
+      '<div class="log-empty">' +
+        '<div class="log-empty-icon">\ud83d\udccb</div>' +
+        '<div class="log-empty-title">No data to display</div>' +
+        '<div class="log-empty-sub">Submissions were found but contained no production or dispatch quantities.</div>' +
+      '</div>';
+    return;
+  }
+
+  // ── Render batches ───────────────────────────────────────────────────
+  list.innerHTML = warningHtml + meaningfulBatches.slice(0, 8).map(function(b, i) {
     var dt  = new Date(b.ts);
     var day = dt.toLocaleDateString('en-IN', { weekday:'short', day:'numeric', month:'short' });
     var tim = dt.toLocaleTimeString('en-IN', { hour:'2-digit', minute:'2-digit' });
-    var rows = (b.batch || []).map(function(e) {
-      return '<div class="log-row">' +
-        '<span class="log-machine">' + (e.machine || '\u2014') + '</span>' +
-        '<div>' +
-          '<div class="log-product">' + (e.product || '\u2014') + '</div>' +
-          '<div class="log-meta">' + ([e.thickness, e.grade, e.color].filter(Boolean).join(' \u00b7 ') || '\u2014') + '</div>' +
-        '</div>' +
-        '<div class="log-qty">' +
-          (e.production ? '<span class="log-prod">\u2191' + e.production + '</span>' : '') +
-          (e.dispatch   ? '<span class="log-disp">\u2193' + e.dispatch   + '</span>' : '') +
-        '</div>' +
-      '</div>';
-    }).join('');
-    var entryWord = b.batch.length === 1 ? 'entry' : 'entries';
+    var rows = (b.batch || [])
+      .filter(function(e) { return Number(e.production) > 0 || Number(e.dispatch) > 0; })
+      .map(function(e) {
+        return '<div class="log-row">' +
+          '<span class="log-machine">' + (e.machine || '\u2014') + '</span>' +
+          '<div>' +
+            '<div class="log-product">' + (e.product || '\u2014') + '</div>' +
+            '<div class="log-meta">' + ([e.thickness, e.grade, e.color].filter(Boolean).join(' \u00b7 ') || '\u2014') + '</div>' +
+          '</div>' +
+          '<div class="log-qty">' +
+            (Number(e.production) > 0 ? '<span class="log-prod">\u2191' + e.production + '</span>' : '') +
+            (Number(e.dispatch)   > 0 ? '<span class="log-disp">\u2193' + e.dispatch   + '</span>' : '') +
+          '</div>' +
+        '</div>';
+      }).join('');
+    var entryCount = (b.batch || []).filter(function(e) { return Number(e.production) > 0 || Number(e.dispatch) > 0; }).length;
+    var entryWord  = entryCount === 1 ? 'entry' : 'entries';
     return '<div class="log-batch">' +
       '<div class="log-batch-hdr" onclick="var d=this.nextElementSibling;d.style.display=d.style.display===\'none\'?\'block\':\'none\'">' +
-        '<span class="log-batch-count">' + b.batch.length + ' ' + entryWord + '</span>' +
+        '<span class="log-batch-count">' + entryCount + ' ' + entryWord + '</span>' +
         '<span class="log-batch-date">' + (b.batch[0] && b.batch[0].date ? b.batch[0].date : day) + '</span>' +
         '<span class="log-batch-time">' + tim + '</span>' +
       '</div>' +
@@ -931,7 +1002,7 @@ function copyScript() { navigator.clipboard.writeText(APPS_SCRIPT).then(function
 /* ── APPS SCRIPT ──────────────────────────────────────────────────── */
 var APPS_SCRIPT = [
 "// ═══════════════════════════════════════════════════════════════════════",
-"// HIPL Production & Dispatch Tracker — Google Apps Script v5.1",
+"// HIPL Production & Dispatch Tracker — Google Apps Script v5.2",
 "// ═══════════════════════════════════════════════════════════════════════",
 "//",
 "// !! IMPORTANT — CLEAN INSTALL STEPS (do this carefully) !!",
@@ -1027,20 +1098,26 @@ var APPS_SCRIPT = [
 "  // 4. onEdit — instant single-row recalc on direct edit",
 "  ScriptApp.newTrigger('onEdit').forSpreadsheet(ss).onEdit().create();",
 "",
+"  // 5. Dispatch sync — every 30 minutes",
+"  //    Reads dispatch totals from the source spreadsheet and writes",
+"  //    them into the correct Disp cells in this tracker sheet.",
+"  ScriptApp.newTrigger('syncDispatchedData').timeBased().everyMinutes(30).create();",
+"",
 "  // Run once right now",
 "  hourlyRecalc();",
 "",
 "  safeAlert(",
-"    '✅  HIPL Tracker v5.1 — Triggers installed!\\n\\n' +",
+"    '✅  HIPL Tracker v5.2 — Triggers installed!\\n\\n' +",
 "    '• Hourly: auto-recalcs TD / Closing / Sq.Ft from IMPORTRANGE\\n' +",
+"    '• Every 30 min: syncs dispatch data from source spreadsheet\\n' +",
 "    '• Daily 6 AM: full recalc + month-end Opening rollover\\n' +",
 "    '• onEdit: instant row recalc when you type in the sheet\\n' +",
 "    '• onOpen: hides old date columns\\n\\n' +",
 "    'First recalc already ran. No manual action ever needed again.\\n\\n' +",
-"    '⚠  REMINDER: Delete any old script files (Code.gs, syncDisp.gs)\\n' +",
-"    'from the Apps Script Files panel to stop old trigger errors.'",
+"    '⚠  REMINDER: Delete any OLD duplicate files (old Code.gs)\\n' +",
+"    'from the Apps Script Files panel if they still exist.'",
 "  );",
-"  Logger.log('setupAllTriggers v5.1 complete.');",
+"  Logger.log('setupAllTriggers v5.2 complete.');",
 "}",
 "",
 "// ═══════════════════════════════════════════════════════════════════════",
@@ -1124,6 +1201,277 @@ var APPS_SCRIPT = [
 "  }",
 "}",
 "",
+"",
+"// ═══════════════════════════════════════════════════════════════════════",
+"// SECTION 2B — DISPATCH SYNC (syncDispatchedData)",
+"// Reads dispatch totals from the Dispatch spreadsheet (Sheet 1)",
+"// and writes them into the correct Disp cells in this tracker (Sheet 2).",
+"// Runs automatically every 30 minutes via trigger installed by setupAllTriggers.",
+"// Safe to run manually any time from the editor too.",
+"// ═══════════════════════════════════════════════════════════════════════",
+"",
+"// ── CONFIG — update these if spreadsheet IDs ever change ────────────────",
+"var DISPATCH_SHEET1_ID  = '1C4heyLELF7CJsFqC-c53SJwcpIxQPBZm6EYdjBl-cdg'; // Dispatch source",
+"var DISPATCH_SHEET2_ID  = '19G5BecW4aT1SspRiwKI3Vp4s9lgh-FZOAoIyzt0Lz2w'; // This tracker",
+"var DISPATCH_SHEET1_TAB = 'Daily Summary';",
+"",
+"// Sheet 1 column headers",
+"var DS1_DATE      = 'Date';",
+"var DS1_MACHINE   = 'Machine';",
+"var DS1_PRODUCT   = 'Product';",
+"var DS1_THICKNESS = 'Thickness';",
+"var DS1_COLOR     = 'Color';",
+"var DS1_DISP      = 'Total Dispatched';",
+"",
+"// Sheet 2 column headers",
+"var DS2_MACHINE   = 'Machine Name';",
+"var DS2_PRODUCT   = 'Product';",
+"var DS2_THICKNESS = 'Thickness';",
+"var DS2_COLOR     = 'Colour';",
+"var DS2_DISP_HDR  = 'Disp';",
+"",
+"// Row structure constants (0-based)",
+"var DS_DATE_HEADER_ROW = 0;  // Row 1: merged date headers",
+"var DS_COL_HEADER_ROW  = 1;  // Row 2: column headers (Machine Name, Product, Prod, Disp…)",
+"var DS_DATA_START_ROW  = 2;  // Row 3+: data",
+"",
+"function syncDispatchedData() {",
+"  // Called by time-based trigger every 30 minutes — NO getUi() allowed here",
+"  // safeAlert() is used at the end so it works both from trigger and manual run",
+"  try {",
+"    var ss1 = SpreadsheetApp.openById(DISPATCH_SHEET1_ID);",
+"    var src = ss1.getSheetByName(DISPATCH_SHEET1_TAB);",
+"    if (!src) throw new Error('Tab \"' + DISPATCH_SHEET1_TAB + '\" not found in dispatch source sheet');",
+"",
+"    var srcData = src.getDataRange().getValues();",
+"    var srcHdr  = srcData[0].map(function(h) { return h.toString().trim(); });",
+"",
+"    var idx = {",
+"      date      : srcHdr.indexOf(DS1_DATE),",
+"      machine   : srcHdr.indexOf(DS1_MACHINE),",
+"      product   : srcHdr.indexOf(DS1_PRODUCT),",
+"      thickness : srcHdr.indexOf(DS1_THICKNESS),",
+"      color     : srcHdr.indexOf(DS1_COLOR),",
+"      disp      : srcHdr.indexOf(DS1_DISP)",
+"    };",
+"",
+"    // Validate all required columns exist",
+"    var missing = [];",
+"    Object.keys(idx).forEach(function(name) {",
+"      if (idx[name] === -1) missing.push(name);",
+"    });",
+"    if (missing.length > 0) {",
+"      throw new Error('Columns not found in dispatch source: ' + missing.join(', '));",
+"    }",
+"",
+"    var ss2 = SpreadsheetApp.openById(DISPATCH_SHEET2_ID);",
+"    var updatedCount = 0;",
+"    var skippedCount = 0;",
+"    var skippedReasons = [];",
+"",
+"    // Only sync rows within the last 5 days — older rows are already settled",
+"    // and re-syncing them every 30 min wastes quota unnecessarily.",
+"    var cutoffDate = new Date();",
+"    cutoffDate.setDate(cutoffDate.getDate() - 5);",
+"    cutoffDate.setHours(0, 0, 0, 0);  // start of day 5 days ago",
+"",
+"    // Cache dest sheets to avoid repeated openById calls",
+"    var destCache = {};",
+"",
+"    for (var r = 1; r < srcData.length; r++) {",
+"      var row = srcData[r];",
+"      if (!row[idx.date] && !row[idx.machine]) continue;  // skip blank rows",
+"",
+"      var rawDate     = row[idx.date];",
+"      var s1Machine   = dsNormField(row[idx.machine]);",
+"      var s1Product   = dsNormField(row[idx.product]);",
+"      var s1Thickness = dsNormField(row[idx.thickness]);",
+"      var s1Color     = dsNormField(row[idx.color]);",
+"      var s1Disp      = row[idx.disp];",
+"",
+"      // Skip rows older than 5 days — no need to re-sync settled data",
+"      var rowDate = dsParseDate(rawDate);",
+"      if (!rowDate || rowDate < cutoffDate) continue;",
+"",
+"      // Derive tab name e.g. \"Mar-26\"",
+"      var tabName = dsGetTabName(rawDate);",
+"      if (!tabName) {",
+"        skippedReasons.push('Row ' + (r+1) + ': Cannot parse date \"' + rawDate + '\"');",
+"        skippedCount++;",
+"        continue;",
+"      }",
+"",
+"      // Use cached sheet or load fresh",
+"      if (!destCache[tabName]) {",
+"        destCache[tabName] = ss2.getSheetByName(tabName);",
+"      }",
+"      var dest = destCache[tabName];",
+"      if (!dest) {",
+"        skippedReasons.push('Row ' + (r+1) + ': Tab \"' + tabName + '\" not found in tracker');",
+"        skippedCount++;",
+"        continue;",
+"      }",
+"",
+"      var destData    = dest.getDataRange().getValues();",
+"      var dateRow     = destData[DS_DATE_HEADER_ROW];",
+"      var colHdrRow   = destData[DS_COL_HEADER_ROW];",
+"      var s1DateLabel = dsNormalizeDateToLabel(rawDate);",
+"",
+"      // Find key column indexes from Row 2",
+"      var s2MachineIdx   = -1, s2ProductIdx = -1, s2ThicknessIdx = -1, s2ColorIdx = -1;",
+"      for (var c = 0; c < colHdrRow.length; c++) {",
+"        var h = colHdrRow[c].toString().trim();",
+"        if (h === DS2_MACHINE)    s2MachineIdx   = c;",
+"        if (h === DS2_PRODUCT)    s2ProductIdx   = c;",
+"        if (h === DS2_THICKNESS)  s2ThicknessIdx = c;",
+"        if (h === DS2_COLOR)      s2ColorIdx     = c;",
+"      }",
+"",
+"      if (s2MachineIdx === -1 || s2ProductIdx === -1 || s2ThicknessIdx === -1 || s2ColorIdx === -1) {",
+"        throw new Error(",
+"          'Key columns not found in tracker Row 2 of tab \"' + tabName + '\". ' +",
+"          'Expected: \"' + DS2_MACHINE + '\", \"' + DS2_PRODUCT + '\", \"' + DS2_THICKNESS + '\", \"' + DS2_COLOR + '\"'",
+"        );",
+"      }",
+"",
+"      // Find the date column in Row 1",
+"      var dateColIndex = -1;",
+"      for (var c2 = 0; c2 < dateRow.length; c2++) {",
+"        if (dateRow[c2] && dsNormalizeDateToLabel(dateRow[c2]) === s1DateLabel) {",
+"          dateColIndex = c2;",
+"          break;",
+"        }",
+"      }",
+"",
+"      if (dateColIndex === -1) {",
+"        // Date column doesn't exist in the tracker — production data for this date",
+"        // has not been uploaded via the app yet. This is normal and expected.",
+"        // The dispatch value will sync automatically once production is uploaded.",
+"        skippedReasons.push(",
+"          'Row ' + (r+1) + ': Production data for ' + s1DateLabel +",
+"          ' has not been uploaded yet — dispatch will sync once production is entered [' +",
+"          s1Machine + ' | ' + s1Product + ']'",
+"        );",
+"        skippedCount++;",
+"        continue;",
+"      }",
+"",
+"      // Disp is always one column after Prod (dateColIndex + 1)",
+"      var dispColIndex = dateColIndex + 1;",
+"",
+"      // Safety check — confirm Row 2 says \"Disp\" at this position",
+"      if (colHdrRow[dispColIndex].toString().trim() !== DS2_DISP_HDR) {",
+"        skippedReasons.push(",
+"          'Row ' + (r+1) + ': Expected \"' + DS2_DISP_HDR + '\" at col ' + (dispColIndex+1) +",
+"          ' but found \"' + colHdrRow[dispColIndex] + '\" — tab \"' + tabName + '\"'",
+"        );",
+"        skippedCount++;",
+"        continue;",
+"      }",
+"",
+"      // Match data row and write Disp value",
+"      var matched = false;",
+"      for (var dr = DS_DATA_START_ROW; dr < destData.length; dr++) {",
+"        var dRow = destData[dr];",
+"        var s2Machine   = dsNormField(dRow[s2MachineIdx]);",
+"        var s2Product   = dsNormField(dRow[s2ProductIdx]);",
+"        var s2Thickness = dsNormField(dRow[s2ThicknessIdx]);",
+"        var s2Color     = dsNormField(dRow[s2ColorIdx]);",
+"",
+"        if (s2Machine === s1Machine && s2Product === s1Product &&",
+"            s2Thickness === s1Thickness && s2Color === s1Color) {",
+"          dest.getRange(dr + 1, dispColIndex + 1).setValue(s1Disp);",
+"          Logger.log('syncDisp OK: \"' + tabName + '\" row ' + (dr+1) +",
+"                     ' [' + s1Machine + '|' + s1Product + '] Disp=' + s1Disp);",
+"          updatedCount++;",
+"          matched = true;",
+"          break;",
+"        }",
+"      }",
+"",
+"      if (!matched) {",
+"        skippedReasons.push(",
+"          'Row ' + (r+1) + ': No match for [' + s1Machine + '|' + s1Product +",
+"          '|' + s1Thickness + '|' + s1Color + '] in \"' + tabName + '\"'",
+"        );",
+"        skippedCount++;",
+"      }",
+"    }",
+"",
+"    // After writing all Disp values, trigger a recalc on all monthly sheets",
+"    // so TD, Closing, Sq.Ft, Sq.Mtr update immediately",
+"    try {",
+"      getMonthlySheets(ss2).forEach(function(sheet) {",
+"        recalcAllRowsBatch(sheet);",
+"      });",
+"      Logger.log('syncDisp: post-sync recalc done');",
+"    } catch(re) {",
+"      Logger.log('syncDisp: post-sync recalc error: ' + re.toString());",
+"    }",
+"",
+"    var summary = 'syncDispatchedData: updated=' + updatedCount + ' skipped=' + skippedCount;",
+"    if (skippedReasons.length > 0) summary += ' | ' + skippedReasons.slice(0,3).join(' | ');",
+"    saveLog(summary);",
+"    Logger.log(summary);",
+"",
+"    // safeAlert shows popup when run manually; silently logs when run by trigger",
+"    var msg = '✅ Dispatch Sync Complete!\\n\\nUpdated : ' + updatedCount + ' rows\\nSkipped : ' + skippedCount + ' rows';",
+"    if (skippedReasons.length > 0) msg += '\\n\\nSkip Details:\\n' + skippedReasons.join('\\n');",
+"    safeAlert(msg);",
+"",
+"  } catch(err) {",
+"    Logger.log('syncDispatchedData ERROR: ' + err.toString());",
+"    saveLog('syncDispatchedData ERROR: ' + err.toString());",
+"    safeAlert('❌ Dispatch Sync Error:\\n\\n' + err.toString());",
+"  }",
+"}",
+"",
+"// ── HELPER: Normalize a name/color string for fuzzy matching ─────────────────",
+"// Strips leading/trailing spaces, collapses internal spaces, lowercases.",
+"// \"Basant Ji\", \"Basant ji\", \"BasantJi\", \"basantji\" all become \"basant ji\"",
+"// (internal spaces are preserved so \"basant ji\" ≠ \"basantji\" — but case and",
+"//  extra whitespace are ignored so \"Basant  Ji\" = \"Basant Ji\" = \"basant ji\")",
+"function dsNormField(val) {",
+"  return String(val || '').trim().replace(/\\s+/g, ' ').toLowerCase();",
+"}",
+"function dsGetTabName(val) {",
+"  var d = dsParseDate(val);",
+"  if (!d) return null;",
+"  var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];",
+"  return months[d.getMonth()] + '-' + String(d.getFullYear()).slice(-2);",
+"}",
+"",
+"// ── HELPER: Date value → \"DD-Mon-YY\" label e.g. \"09-Mar-26\" ─────────────────",
+"function dsNormalizeDateToLabel(val) {",
+"  var d = dsParseDate(val);",
+"  if (!d) return val ? val.toString().trim() : '';",
+"  var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];",
+"  var day    = String(d.getDate()).padStart(2, '0');",
+"  return day + '-' + months[d.getMonth()] + '-' + String(d.getFullYear()).slice(-2);",
+"}",
+"",
+"// ── HELPER: Parse any date format into a JS Date ─────────────────────────────",
+"function dsParseDate(val) {",
+"  if (!val) return null;",
+"  if (val instanceof Date) return isNaN(val) ? null : val;",
+"  var s = val.toString().trim();",
+"  var native = new Date(s);",
+"  if (!isNaN(native)) return native;",
+"  // DD-MM-YYYY or DD/MM/YYYY",
+"  var dmy = s.match(/^(\\d{1,2})[-\\/](\\d{1,2})[-\\/](\\d{2,4})$/);",
+"  if (dmy) {",
+"    var year = dmy[3].length === 2 ? '20' + dmy[3] : dmy[3];",
+"    return new Date(year + '-' + dmy[2].padStart(2,'0') + '-' + dmy[1].padStart(2,'0'));",
+"  }",
+"  // DD-Mon-YY or DD-Mon-YYYY e.g. \"25-Feb-26\"",
+"  var dMonY = s.match(/^(\\d{1,2})[-\\/]([A-Za-z]{3})[-\\/](\\d{2,4})$/);",
+"  if (dMonY) {",
+"    var year2 = dMonY[3].length === 2 ? '20' + dMonY[3] : dMonY[3];",
+"    return new Date(year2 + '-' + dMonY[2] + '-' + dMonY[1].padStart(2,'0'));",
+"  }",
+"  return null;",
+"}",
+"",
 "// ═══════════════════════════════════════════════════════════════════════",
 "// SECTION 3 — MONTH-END ROLLOVER",
 "// ═══════════════════════════════════════════════════════════════════════",
@@ -1176,7 +1524,7 @@ var APPS_SCRIPT = [
 "  var count       = 0;",
 "",
 "  for (var r = 0; r < dataRows; r++) {",
-"    var machine = String(identVals[r][COL.MACHINE - 1] || '');",
+"    var machine = String(identVals[r][COL.MACHINE - 1] || '').trim();",
 "",
 "    if (!machine) {",
 "      totalOutput.push(['', '', '']);",
@@ -1204,7 +1552,7 @@ var APPS_SCRIPT = [
 "    var closing = opening + tp - td;",
 "    totalOutput.push([tp, td, closing]);",
 "",
-"    var product = String(identVals[r][COL.PRODUCT - 1] || '');",
+"    var product = String(identVals[r][COL.PRODUCT - 1] || '').trim();",
 "    var factor  = CONV_FACTORS[machine + '|' + product];",
 "    if (factor && factor > 0 && closing > 0) {",
 "      var sqft = closing / factor;",
@@ -1234,7 +1582,7 @@ var APPS_SCRIPT = [
 "  if (pairCount < 1) return;",
 "",
 "  var identVals = sheet.getRange(row, 1, 1, 6).getValues()[0];",
-"  var machine   = String(identVals[COL.MACHINE - 1] || '');",
+"  var machine   = String(identVals[COL.MACHINE - 1] || '').trim();",
 "  if (!machine) return;",
 "",
 "  var opening  = Number(identVals[COL.OPENING - 1]) || 0;",
@@ -1255,7 +1603,7 @@ var APPS_SCRIPT = [
 "  var tpCol   = lastCol - TOTAL_COLS + 1;",
 "  sheet.getRange(row, tpCol, 1, 3).setValues([[tp, td, closing]]);",
 "",
-"  var product = String(identVals[COL.PRODUCT - 1] || '');",
+"  var product = String(identVals[COL.PRODUCT - 1] || '').trim();",
 "  var factor  = CONV_FACTORS[machine + '|' + product];",
 "  if (factor && factor > 0 && closing > 0) {",
 "    var sqft = closing / factor;",
@@ -1563,7 +1911,7 @@ var APPS_SCRIPT = [
 "    }",
 "    return json({ status:'ok', received:null });",
 "  }",
-"  return json({ status:'ok', app:'HIPL Tracker', version:'5.1' });",
+"  return json({ status:'ok', app:'HIPL Tracker', version:'5.2' });",
 "}",
 "",
 "function doPost(e) {",
